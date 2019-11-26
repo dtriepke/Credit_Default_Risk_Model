@@ -1,0 +1,780 @@
+---
+title: "Case study of the “Risk Assessment GmbH”"
+output: html_notebook
+---
+*Autor: Dennis Triepke*  
+*Date: 26.06.2017*  
+
+
+You are the new extraordinary Data Scientist of the “Risk Assessment GmbH” and you really want to become a part of this company. The “Risk Assessment GmbH” is a leading company for modelling speciﬁc risks of customers. They develop models based on diﬀerent statistical and machine learning algorithms. As part of your job you have to solve a speciﬁc case study for this company and provide a solution which could be implemented. Remark: There are several ways to solve this task, but please ﬁnd a reasonable way!
+
+
+
+# Initialisation
+***
+```{r}
+# Clear environment
+rm(list = ls(all = TRUE))
+
+# Packages
+library(dplyr)
+library(lattice)
+library(ggplot2)
+library(plotly)
+
+# Helping functions
+count_na <- function(x, rel = TRUE){
+  
+  if(rel){
+    return(is.na(x) %>% sum() / x %>% length)
+  }
+  
+  return(is.na(x) %>% sum())
+  
+}
+
+normalize <- function(x){
+  (x - min(x, na.rm = TRUE)) / (max(x, na.rm = TRUE) - min(x, na.rm = TRUE))
+}
+
+# temp working environment
+envir_tmp <- new.env()
+
+# data envir 
+df <- new.env()
+
+
+# Localization
+pathImp <- "ImportData/"
+pathExp <- "ExportData/"
+```
+
+
+
+# 1. Feching Data
+***
+Read in trainig data and test data from project folder.
+```{r}
+df$df <- read.csv2(paste0(pathImp,"RAcredit_train.csv"), sep = ",", stringsAsFactors = TRUE, dec = ".") 
+df$predict <- read.csv2(paste0(pathImp,"RAcredit_test.csv"), sep = ",", stringsAsFactors = TRUE, dec = ".")
+```
+
+
+
+# 2. Pre-Processings
+***
+
+The objective is to prepare a valid final data set for modelling. In this step, the data set is analyzed for missing values and determine variables types.
+
+
+## 2.1 Varibale selection
+Prefilter of variabels with  high senity and low complexity.
+
+```{r}
+# Ignore the ID variables.
+envir_tmp$df_prep <- df$df %>% 
+  select(-id, -member_id)
+```
+
+
+```{r}
+# Ignore varibales with to much levels in order to find a simple model.
+tmp <- c()
+p <- 1
+
+for(i in names(envir_tmp$df_prep)){
+  tmp[p] <- envir_tmp$df_prep[,i] %>% levels %>% length 
+  p <- p + 1
+}
+
+tmp
+```
+
+```{r}
+# Logical validation of the omitted variables. 
+envir_tmp$df_prep[, tmp >35] %>% names
+```
+
+
+> - The time variable seems to be biased with non date information in there. In terms of time performance this will to be fixed.  
+
+> - Regionalization information is also ignored for the complexity. But noted as a may good explanation of credit default.  Additionally are these variable not clean in terms of just zip code information.
+
+
+
+```{r}
+# Get just variables with less than 35 levels.
+envir_tmp$df_prep <- envir_tmp$df_prep[, tmp <= 35]
+```
+
+
+
+## 2.2 Missing Data
+
+### 2.2.1 Variables
+Proof the NA rate per variable and ignore varibale with to less information $:= \text{NA rate} > 0.5$
+```{r}
+envir_tmp$df_na = data.frame(var = envir_tmp$df_prep %>% names,
+                             na_rate = apply(envir_tmp$df_prep, 2, count_na) %>% as.numeric())
+
+# Quantiles
+envir_tmp$df_na$na_rate %>% quantile(probs = seq(0,1, 0.05))
+
+
+# Density of NA rate per variable
+(envir_tmp$df_na %>% ggplot(aes(x = na_rate)) +
+  geom_histogram(aes( y = ..density..) , alpha = 0.7, bins = 30) +
+  geom_density(fill = '#ff4d4d', alpha = 0.5) +
+  ggtitle('Density NA Rate of variables') ) %>% ggplotly()
+```
+
+> 20% of the variabels have a NA rate bigger than 0.5 and will be irgnored.
+
+```{r}
+# Choose variabels with sufficient information content 
+envir_tmp$vars <- envir_tmp$df_na$var[which(envir_tmp$df_na$na_rate <= 0.5)] %>% as.character()
+envir_tmp$df_prep <- envir_tmp$df_prep %>% 
+  select_(.dots = envir_tmp$vars)
+
+print(paste0(envir_tmp$vars %>% length, " variables are concidered as sufficent (incl. target variable)"))
+```
+
+
+### 2.2.2 Target Variable
+Furthermore missing information in the target variable `l_state` can't be allowed. Therefore all observations with missing values in the target variable are ignored too. 
+```{r}
+print(paste0("Remove observations due to missing value in target variable: ", envir_tmp$df_prep$l_state %>% is.na() %>% sum))
+
+envir_tmp$df_prep <- envir_tmp$df_prep  %>% 
+  filter(!(l_state %>% is.na))
+```
+
+### 2.2.3 Observation
+Even though the model can deal with NA in data, the NA rate per observation shows the grade of information. 
+
+```{r}
+# Add Na rate per observation
+envir_tmp$df_prep <- envir_tmp$df_prep %>% 
+  mutate(na_rate = apply(envir_tmp$df_prep, 1, count_na) %>% as.numeric())
+
+# Print quantiles
+envir_tmp$df_prep$na_rate %>% quantile(probs = seq(0,1, 0.05))
+```
+
+```{r}
+envir_tmp$df_prep %>% filter (na_rate == 0) %>% nrow() / envir_tmp$df_prep %>% nrow
+```
+
+> Delete all observations with missing entries would decrease the data set about 30%. 
+
+
+
+## 2.3 Formating
+```{r}
+sapply(envir_tmp$df_prep, class) %>% table
+```
+
+
+```{r}
+# Pass pre processed data frame from tmp envir into working space 
+df$prep <- envir_tmp$df_prep
+
+# clear tmp envir
+envir_tmp <- new.env()
+```
+
+
+
+
+
+
+# 3. Modeling Tree Classifier
+***
+
+## 3.1 Split data 
+Split data in train and test data for leave-one-out validation. 
+
+```{r}
+set.seed(18)
+
+# SPlit data for modeling and evaluation by 1/3 rule 
+envir_tmp$train <- sample(1:nrow(df$prep), nrow(df$prep) * 2/3 , replace = FALSE)
+envir_tmp$test <- -envir_tmp$train
+
+df$test <- df$prep[envir_tmp$test,]
+df$train <- df$prep[envir_tmp$train,] 
+```
+
+
+```{r}
+# Distribution of the class
+df$train %>% 
+  group_by(l_state) %>% 
+  summarise(n = n(),
+            rel = n / df$train %>% nrow)
+```
+> The class distribution in the training data is skewed in the direction of "Fully Paid".
+
+
+*(Note: A try took place with a balanced bootstrap training data set but with a more worse comparing to the leave-one-out training data)*
+
+
+## 3.2 Classification with Decision Tree
+
+```{r}
+library(rpart)
+tree_model <- rpart(l_state ~., 
+                    method = "class", 
+                    data = df$train %>% 
+                      #select(-last_pymnt_d, -last_credit_pull_d, -issue_d) %>%
+                      select(-na_rate) 
+                      #filter(!(pymnt_plan %in% c("Apr-2017", "Jun-2017", "May-2017")) )
+                    )
+
+```
+
+
+
+## 3.3 Examine Result 
+```{r}
+printcp(tree_model) 
+```
+
+
+
+## 3.4 Prune Tree
+Prune the tree to avoid overfitting. The taken package provids the cross validation error. Choose the tree size which minimized the error.
+```{r}
+tree_model$cptable
+plotcp(tree_model) # Gives a visual representation of the cross-validation results 
+```
+
+
+```{r}
+prune_tree <- prune(tree_model, cp = tree_model$cptable[which.min(tree_model$cptable[,"xerror"]), "CP"])
+prune_tree
+```
+
+
+## 3.5 Final Tree
+```{r}
+library(rpart.plot)
+# Plot the pruned tree with the probability of the fitted class
+rpart.plot(prune_tree, extra = 8)
+```
+
+
+
+> The tree classifier choose the spilt variables: issue_d, last_pymnt_d, out_prncp, pymnt_plan, total_pymnt, total_rec_prncp.   
+
+
+It turns out that the most reasonable detection for a  credit default is the variable `pymnt_plan` and the levels:
+  Apr-2017, Current,
+  Fully Paid,
+  In Grace Period,
+  Jun-2017,
+  Late (31-120 days),
+  May-2017,
+  Not Verified,
+  Verified,
+  y.
+Whereas the level n leads to further considerations.
+
+
+
+
+
+
+# 4. Validation 
+***
+
+
+Use the test data set for predict the classes of the credit and evaluation the tree classifier.
+The Classifier estimate the probability for each observation of being either in class "Default" or "Fully Paid". To decide the class, following decision  boundary is applied: **P(Fully Paid) < 0.5 $\rightarrow$ class = Default**. 
+
+
+**Predict **
+```{r}
+# Predict the class
+tmp <- cbind(df$test %>% select(l_state), 
+             predict(prune_tree, df$test %>% select(-l_state) ) ) %>% 
+  mutate(l_state_pred = ifelse(`Fully Paid` < 0.5, "Default", "Fully Paid")) 
+
+tmp %>% head()
+
+```
+
+```{r}
+# Confusion matrix
+table(tmp$l_state,tmp$l_state_pred, dnn = c("actual", "predict"))
+
+```
+
+**Accurancy**
+```{r}
+# Accurancy tree model
+print(paste0("Accuracy tree model: ", (tmp$l_state == tmp$l_state_pred) %>% mean(na.rm = TRUE)))
+
+# Navive approach: classify all as Fully Paid
+print(paste0("Accuracy trivial approach: ", (df$test$l_state == "Fully Paid") %>% mean))
+
+```
+
+> The tree model classifier is slightly better (0.02) than the trivial approach with classify all credits as "Fully Paid".
+
+
+
+**Precicion**
+```{r}
+# CLass = Fully Paid
+(tmp %>% filter(l_state == "Fully Paid" & l_state_pred == "Fully Paid") %>% nrow) /
+  (tmp %>% filter(l_state == "Fully Paid" & l_state_pred == "Fully Paid") %>% nrow +
+     tmp %>% filter(l_state == "Default" & l_state_pred == "Fully Paid") %>% nrow )
+
+# CLass = Default
+(tmp %>% filter(l_state == "Default" & l_state_pred == "Default") %>% nrow) /
+  (tmp %>% filter(l_state == "Fully Paid" & l_state_pred == "Default") %>% nrow +
+     tmp %>% filter(l_state == "Default" & l_state_pred == "Default") %>% nrow )
+```
+
+**Recall/ hit rate**
+```{r}
+# CLass = Fully Paid
+(tmp %>% filter(l_state == "Fully Paid" & l_state_pred == "Fully Paid") %>% nrow) /
+  (tmp %>% filter(l_state == "Fully Paid" & l_state_pred == "Fully Paid") %>% nrow +
+     tmp %>% filter(l_state == "Fully Paid" & l_state_pred == "Default") %>% nrow )
+
+# CLass = Default
+(tmp %>% filter(l_state == "Default" & l_state_pred == "Default") %>% nrow) /
+  (tmp %>% filter(l_state == "Default" & l_state_pred == "Default") %>% nrow +
+     tmp %>% filter(l_state == "Default" & l_state_pred == "Fully Paid") %>% nrow )
+```
+
+
+**F - measure** 
+$$
+F = \frac{2 \times precision \times recall}{precission + recall}
+$$
+```{r}
+# Class = Fully Paid 
+2 * 0.9854457 * 0.9954638 / ( 0.9854457 + 0.9954638)
+
+# Class = Default
+2 * 0.8308157 * 0.6024096/ ( 0.8308157 + 0.6024096)
+```
+
+> One can see that the model classify strongly in direction of the class "Fully Paid". The overall performance in terms of precision and recall for the default class is with 70% appropriate. Considering merely the recall the predictive power of credit default, it is with 60%. This is low but still above 50% (which means better than a random guess).
+
+
+
+
+
+# 5. Benchmark Classifier: single-hidden-layer neural network
+*** 
+
+As a benchmark approach a Neural Network with 1 hidden layer as a classifier is used with just numerical input variables. 
+In order to guarantee the comparison of both model, the same split for test and training are used with a selection of all numerical variables.
+
+## 5.1 Variable selection and Pre Processing
+```{r}
+# Select all numerical variables from the current traing data set
+df$train_nn <-  df$train %>% 
+  select_(.dots = c(sapply(df$train ,class) %>% 
+                      data.frame() %>%
+                      add_rownames() %>% 
+                      rename_("level" = ".") %>% 
+                      filter(level == "numeric") %>% 
+                      select(rowname) %>% 
+                      .$rowname, 
+                    "l_state"))
+           
+# Select all numerical variables from the current test data set
+df$test_nn <-  df$test %>% 
+  select_(.dots = c(sapply(df$train ,class) %>% 
+                      data.frame() %>%
+                      add_rownames() %>% 
+                      rename_("level" = ".") %>% 
+                      filter(level == "numeric") %>% 
+                      select(rowname) %>% 
+                      .$rowname, 
+                    "l_state"))
+```
+
+**Normalize Data**
+```{r}
+# Train data
+df$train_nn_norm <- lapply(df$train_nn %>% 
+                        select(-l_state, - na_rate), 
+                      FUN = function(x){normalize(x)}) %>% 
+  data.frame() %>% 
+  bind_cols(df$train_nn %>% select(l_state, na_rate))
+
+# Test data
+df$test_nn_norm <- lapply(df$test_nn %>% 
+                        select(-l_state, - na_rate), 
+                      FUN = function(x){normalize(x)}) %>% 
+  data.frame() %>% 
+  bind_cols(df$test_nn %>% select(l_state, na_rate))
+```
+
+
+## 5.2 Number of neurons
+```{r}
+library(nnet)
+
+# Cross validation for choose the number of neurons for the hidden layer
+cross.val.nnet<-function(train, test, low_range, high_range){
+  acc <- NULL 
+  for (h in low_range:high_range){
+    
+    temp.nn <- nnet(l_state ~ ., size = h, data = train) 
+    pred <- predict(temp.nn, test, type = "class")
+    Table <- table(test$l_state, pred) 
+    accuracy <- sum(diag(Table)) / sum(Table) 
+    acc <- c(acc, accuracy)
+    }
+  return(acc)
+  }
+
+
+```
+
+```{r}
+set.seed(87)
+# Apply cross validation for number of neurons
+cross.val.nnet(df$train_nn_norm %>% 
+                 filter(na_rate == 0) %>% 
+                 select(-na_rate),
+               df$test_nn_norm %>% 
+                 filter(na_rate == 0) %>% 
+                 select(-na_rate), 
+               1, 10)
+```
+
+> 8 neurons seems reasonoble for the hidden layer. 
+
+```{r}
+# Modlling the nn with 9 neurons
+nn_model <- nnet(l_state ~ ., size = 8, data = df$train_nn_norm) 
+```
+
+## 5.3 Validation
+```{r}
+# Predict
+tmp <- cbind(df$test_nn_norm %>% 
+               filter(na_rate == 0) %>% 
+               select(l_state),
+             
+             logit = predict(nn_model, df$test_nn_norm %>% 
+                             filter(na_rate == 0) %>% 
+                             select(-l_state) ) ) %>%
+  mutate(l_state_pred = ifelse(logit <= 0.5, "Default", "Fully Paid")) 
+
+# Shows how the data look like
+tmp %>% head()
+
+```
+
+```{r}
+# Confusion matrix
+table(tmp$l_state,tmp$l_state_pred, dnn = c("actual", "predict"))
+
+```
+
+**Accurancy**
+```{r}
+# Accurancy tree model
+print(paste0("Accuracy tree model: ", (tmp$l_state == tmp$l_state_pred) %>% mean(na.rm = TRUE)))
+
+# Navive approach: classify all as Fully Paid
+print(paste0("Accuracy trivial approach: ", (df$test$l_state == "Fully Paid") %>% mean))
+
+```
+
+> The nn classifier is slightly better (0.01) than the trivial approach with classify all credits as "Fully Paid" BUT not as good as the tree classifier with acc = 0.98 (see above).
+
+
+
+**Precicion**
+```{r}
+# CLass = Fully Paid
+(tmp %>% filter(l_state == "Fully Paid" & l_state_pred == "Fully Paid") %>% nrow) /
+  (tmp %>% filter(l_state == "Fully Paid" & l_state_pred == "Fully Paid") %>% nrow +
+     tmp %>% filter(l_state == "Default" & l_state_pred == "Fully Paid") %>% nrow )
+
+# CLass = Default
+(tmp %>% filter(l_state == "Default" & l_state_pred == "Default") %>% nrow) /
+  (tmp %>% filter(l_state == "Fully Paid" & l_state_pred == "Default") %>% nrow +
+     tmp %>% filter(l_state == "Default" & l_state_pred == "Default") %>% nrow )
+```
+
+**Recall/ hit rate**
+```{r}
+# CLass = Fully Paid
+(tmp %>% filter(l_state == "Fully Paid" & l_state_pred == "Fully Paid") %>% nrow) /
+  (tmp %>% filter(l_state == "Fully Paid" & l_state_pred == "Fully Paid") %>% nrow +
+     tmp %>% filter(l_state == "Fully Paid" & l_state_pred == "Default") %>% nrow )
+
+# CLass = Default
+(tmp %>% filter(l_state == "Default" & l_state_pred == "Default") %>% nrow) /
+  (tmp %>% filter(l_state == "Default" & l_state_pred == "Default") %>% nrow +
+     tmp %>% filter(l_state == "Default" & l_state_pred == "Fully Paid") %>% nrow )
+```
+
+
+**F - measure** 
+$$
+F = \frac{2 \times precision \times recall}{precission + recall}
+$$
+```{r}
+# Class = Fully Paid 
+2 * 0.9772962 * 0.999165 / ( 0.9772962 + 0.999165)
+
+# Class = Default
+2 * 0.7457627 * 0.09544469/ ( 0.7457627 + 0.09544469)
+```
+
+
+> Comparing to the results with the tree classifier, the nn has a way less predictive power for the credit default (0.09), whereby the model can't be recommended. 
+
+
+
+
+
+
+# 6. Prediction
+*** 
+
+Use the given data set for estimate the credit status. As it turns out, in the data set are new informations in the variable `issue_d`. Since there are just a few, there will be removed 
+
+## 6.1 Prediction on new data
+```{r}
+df$predict <- cbind(predict(prune_tree, 
+                            df$predict %>% 
+                            # Filter new unobserved levels:
+                            # this is hard coded solution and not suitable for a real implementation.
+                            filter(!(issue_d %in% c("20000", "36000", "OWN"))) %>%
+                            select(-l_state) %>% mutate(na_rate = NA)),
+                        df$predict %>% filter(!(issue_d %in% c("20000", "36000", "OWN")))
+                        ) %>% 
+  mutate(l_state_pred = ifelse(`Fully Paid` < 0.5, "Default", "Fully Paid")) 
+
+df$predict %>% 
+  select(Default, `Fully Paid`, l_state_pred) %>% head
+```
+> One can understand the tree estimation `Default` as credit default risk and `Fully Paid` as the likelohood of no default.  
+
+
+## 6.2 Analysis on the estimated credit defauld risk. 
+
+**Over all **
+```{r}
+# median  credit defaukt risk
+print(paste0("The median over all credit default risk is: ", df$predict$Default %>% median() %>% round(4)))
+print(paste0("The mean over all credit default risk is: ", df$predict$Default %>% mean() %>% round(4)))
+```
+> The credit default risk is pretty low, which is not surprising due to the very small number of credit default in the training data.
+
+
+**By estimated classes**
+```{r}
+# estimated credit state
+df$predict %>% 
+  group_by(l_state_pred) %>% 
+  summarise(n = n(),
+            rel = (n / df$predict %>% nrow) %>% round(2),
+            median_default_risk = median(Default),
+            median_Fully_Paid_risk = median(`Fully Paid`)
+            )
+
+```
+> We have a median estimated probability of 4% for being no default, even though we classify the credit as "Default".
+
+**By loan amount**  
+
+```{r}
+# Quantile of loans for finding valid separation borders.
+df$predict$loan_amnt %>% quantile(probs = seq(0,1, 0.05))
+```
+
+```{r}
+# Credit default risk by credit amount (class)
+df$predict <- df$predict %>% mutate(loan_class = ifelse(loan_amnt < 3000, "XS",
+                                                        ifelse(loan_amnt < 6000, "S",
+                                                               ifelse(loan_amnt < 10000, "M",
+                                                                      ifelse(loan_amnt < 18000, "L",
+                                                                             ifelse(loan_amnt < 30000, "XL", "XXL")))))) %>%
+  mutate(loan_class = factor(loan_class, levels= c("XS", "S", "M", "L", "XL", "XXL") ))
+
+df$predict %>%  
+  group_by(loan_class) %>% 
+  summarise(n = n(),
+            rel = (n / df$predict %>% nrow) %>% round(2),
+            mean_default_risk = mean(Default),
+            mean_Fully_Paid_risk = mean(`Fully Paid`)
+            ) 
+
+```
+
+```{r}
+# Effect of the credit default risk by loan amount
+df$predict %>%  
+  group_by(loan_class) %>% 
+  summarise(mean_default_risk = mean(Default)) %>%
+  mutate(mean_risk = df$predict$Default %>% mean) %>% 
+  plot_ly(x = ~ loan_class, y = ~mean_default_risk, 
+          type = "scatter", mode = "markers+lines", line = list(dash = "solid"), 
+          name = "avg credcredit default") %>% 
+  add_trace(x =~ loan_class, y = ~ mean_risk, 
+            type = "scatter", mode = "lines", line = list(dash = "dot"), name = "over all mean") %>% 
+  layout(title = "Effect Plot loan amnt on credit defaulkt risk")
+
+```
+
+> Apart from credits below 3000, one can see that the risk is increasing with the loan amount.
+
+```{r}
+# Statistical proof of the effect
+summary(aov(Default ~ loan_class, data = df$predict))
+```
+
+> Since the p-value is smaller than 0.05, the null hypothesis that all mean default risks are equal among the loan classes can be rejected.
+
+
+
+**Income**
+```{r}
+# Quantile of loans for finding valid separation borders.
+df$predict$annual_inc %>% quantile(probs = seq(0,1, 0.05), na.rm = TRUE)
+```
+
+```{r}
+# Credit default risk by credit amount (class)
+df$predict <- df$predict %>% mutate(income_class = ifelse(annual_inc %>% is.na(), "No_Info",
+                                                          ifelse(annual_inc < 28000, "XS",
+                                                                ifelse(annual_inc < 40000, "S",
+                                                                       ifelse(annual_inc < 68000, "M",
+                                                                              ifelse(annual_inc < 105000, "L",
+                                                                                     ifelse(annual_inc < 170000, "XL", "XXL"))))))) %>%
+  mutate(income_class = factor(income_class, levels= c("No_Info","XS", "S", "M", "L", "XL", "XXL") ))
+
+df$predict %>%  
+  group_by(income_class) %>% 
+  summarise(n = n(),
+            rel = (n / df$predict %>% nrow) %>% round(2),
+            mean_default_risk = mean(Default),
+            mean_Fully_Paid_risk = mean(`Fully Paid`)
+            ) 
+
+```
+
+
+
+```{r}
+# Effect of the credit default risk by loan amount
+df$predict %>%  
+  group_by(income_class) %>% 
+  summarise(mean_default_risk = mean(Default)) %>%
+  mutate(mean_risk = df$predict$Default %>% mean) %>% 
+  plot_ly(x = ~ income_class, y = ~mean_default_risk, 
+          type = "scatter", mode = "markers+lines", line = list(dash = "solid"), 
+          name = "avg credcredit default") %>% 
+  add_trace(x =~ income_class, y = ~ mean_risk, 
+            type = "scatter", mode = "lines", line = list(dash = "dot"), name = "over all mean") %>% 
+  layout(title = "Effect Plot loan amnt on credit defaulkt risk")
+```
+
+
+> If there was no information made for income, there is a high chance that the credit will default. On the other hand, is the risk decreasing with higher income niveau. 
+
+
+```{r}
+# Statistical proof of the effect 
+summary(aov(Default ~ income_class, 
+            data = df$predict %>% filter(income_class != "No_Info")))
+```
+
+```{r}
+# Statistical proof of the effect 
+# with loan_class as random blockeffect 
+summary(aov(Default ~ income_class + Error(loan_class), 
+            data = df$predict %>% filter(income_class != "No_Info")))
+```
+
+> Apart from the "No_Info", the null hypothesis, that all mean credit default risks are equal among all income classes can't be rejected with a 10% significantieniveau. This takes into account the extraction of the systematical effect of the loan class on the credit default risk for the income class.  
+
+
+
+## 6.3 Output 
+```{r}
+df$predict %>% write.csv2(paste0(pathExp, "RAcredit_test.csv"), row.names = FALSE, na = "")
+```
+
+
+
+# 8. Conclusions and model assumptions  
+*** 
+
+I decided to use a less content based approach because of the recommended time of max 8h and the huge amount unkown variables. Nevertheless, the tree classifier performed very well even though the problem based on a skewed dataset and the dataset which may is often not complete or have outliers.
+
+
+Furthermore, it can handle both numerical and categorical variable and it requires less cleaning compared to other modelling techniques.  Additionally, it has a high power identify most relevant variable among many candidates and it is easy to understand and communicate management level.  
+
+
+**Limitations**  
+
+The decision tree based approach is limited by the level of information during the training phase. If the feature space of the training data is biased and not all dimensions are captured, the learned tree can't apply on new data with unobserved information. Also 
+
+As long as day related variables are in the model, the learned tree model can't just simply apply on new data with different days than those from the training data. This means the current model has a low generalisation capability but a high performance on the credits which ends on between April-2017 and Sep-2017. 
+
+Hence, I tried to exclude all day relevant variable like `last_pymnt_d` or `issue_d` but this decreased the predictive power for the credit default in such a way that the tree model isn't longer sufficent. 
+
+Since there is no quick way to fix this, I decided to keep the day variable because of the given test data includes credits with the same end date.  
+Furthermore, with the estimated credit default one can get interesting insights on either loan owner type or credit type by defualt risk which is generalisable (see section 6.2). 
+
+
+
+
+
+**Assumptions**  
+One key assumption of the model is, that the data a representative for the class distribution. Furthermore is assumed that the variable in the training data have full informations (which was not true see issue_d) and the fill rate (means missing data) is in the real data as good as in the training data.
+
+
+
+
+
+# 7 Additional Aproaches
+*** 
+
+There are several approaches which came to my mind for modelling if I had more time:
+
+- First of all find a model which not need any credit day attributes and thus can predict the risc immediately before a credit was graded   
+- second I would estimate the missing values with for example with kNN or mean replacement    
+- try more classsifier until the prediction power for default get better  
+    - Logiostic Regression  
+    - modeling a hazard rate for clustered credit owner  
+    - Bayes Approach  
+    - demension reduction with PCA and run a LDA  
+- stacking approach: find a model for both credit owner and credit type and then pass them into a model which estimates the credit default risk   
+- credit journey estimation 
+    - try to find phases during the credit periode  
+    - estimate the transition probability between the phases (e.g. Markov Process)  
+
+
+
+# 8. Project Performance Meassurment
+***
+
+Phase                     | excpected | actual
+--------------------------|-----------|--------
+ Business Understanding:  | 0h        | 0h
+ Data Understanding:      | 1h        | 2h
+ Data Preparation:        | 2h        | 5h 
+ Modelling:               | 2h        | 4h (loop to preparation)
+ Evaluation:              | 0.5h      | 2h 
+ Deployment:              | 1h        | 0.5 
+ (*Puffer: 1h*)
+
+total time used: 12.5h  
+
+*(note: Within the recommended time of 8h, I was in the modelling phase of the tree classifier.)*

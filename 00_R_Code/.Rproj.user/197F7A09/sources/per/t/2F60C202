@@ -1,0 +1,25 @@
+{
+    "collab_server" : "",
+    "contents" : "",
+    "created" : 1529341075521.000,
+    "dirty" : false,
+    "encoding" : "UTF-8",
+    "folds" : "",
+    "hash" : "2761283205",
+    "id" : "2F60C202",
+    "lastKnownWriteTime" : 1530056005,
+    "last_content_update" : 1530056058939,
+    "path" : "~/01_Project/case_study/Case_Study_SMAVA/00_R_Code/01_Analyse_Data.Rmd",
+    "project_path" : "01_Analyse_Data.Rmd",
+    "properties" : {
+        "chunk_output_type" : "inline",
+        "cursorPosition" : "725,263",
+        "docOutlineVisible" : "1",
+        "scrollLine" : "724",
+        "tempName" : "Untitled1"
+    },
+    "relative_order" : 1,
+    "source_on_save" : false,
+    "source_window" : "",
+    "type" : "r_markdown"
+}
